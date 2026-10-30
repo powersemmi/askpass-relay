@@ -127,6 +127,8 @@ For zsh that is `~/.zshenv` (with a custom `ZDOTDIR`, `$ZDOTDIR/.zshenv`); for b
 
 ```sh
 export SUDO_ASKPASS="$HOME/.cargo/bin/askpass-relay-ask"
+# Only where ~/.cargo/bin is not on the PATH of non-interactive ssh commands (macOS):
+rsudo() { "$HOME/.cargo/bin/rsudo" "$@"; }
 ```
 
 Then let the remote sshd replace stale sockets. This needs root once, through the relay itself:
