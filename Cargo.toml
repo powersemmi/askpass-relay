@@ -1,0 +1,10 @@
+[package]
+name = "askpass-relay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+argh = "0.1.19"
+thiserror = "2.0.21"
+zeroize = "1.9.1"
