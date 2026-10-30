@@ -112,6 +112,11 @@ ssh air 'sudo -A -k true && echo ok'
 The desktop shows a dialog. Approve it, and the command runs. Cancel it, and sudo exits with an
 error at once.
 
+The dialog takes the keyboard focus when it opens, so keys typed into another window at that
+moment land in it. A wrong password makes sudo ask again, up to three times, and each failure
+counts against the host's lockout policy (`pam_faillock` on Arch locks the account for ten
+minutes after three). Cancel a dialog you did not mean to answer.
+
 `ask` has its own options for a manual check: `askpass-relay ask --socket <path> "<prompt>"`.
 `ASKPASS_RELAY_SOCKET` overrides the default socket `~/.askpass-relay/sock`.
 
