@@ -1,0 +1,16 @@
+[Unit]
+Description=Forward the askpass-relay socket to host %i
+Documentation=https://github.com/powersemmi/askpass-relay
+After=askpass-relay.service
+PartOf=graphical-session.target
+StartLimitIntervalSec=0
+
+[Service]
+# The ssh config holds the forward under the alias askpass-relay-%i, so no other connection to
+# the host requests it.
+ExecStart=/usr/bin/ssh -N -o BatchMode=yes askpass-relay-%i
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

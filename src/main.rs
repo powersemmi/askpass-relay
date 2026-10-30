@@ -5,9 +5,10 @@ use std::env;
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
+use std::os::unix::process::CommandExt;
 use std::os::unix::process::parent_id;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -30,6 +31,7 @@ struct Cli {
 enum Subcommand {
     Serve(Serve),
     Ask(Ask),
+    Sudo(Sudo),
 }
 
 /// Listen on a unix socket and answer each request with a password dialog.
@@ -68,6 +70,22 @@ struct Ask {
     prompt: Vec<String>,
 }
 
+/// Run a command with `sudo -A` once the relay answers; never ask for a password through a dead
+/// relay.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "sudo")]
+struct Sudo {
+    /// why the command needs root, shown in the dialog (default: $ASKPASS_RELAY_REASON).
+    #[argh(option)]
+    reason: Option<String>,
+    /// the relay socket (default: $ASKPASS_RELAY_SOCKET, else ~/.askpass-relay/sock).
+    #[argh(option)]
+    socket: Option<PathBuf>,
+    /// the command and its arguments.
+    #[argh(positional, greedy)]
+    command: Vec<String>,
+}
+
 /// Seconds `ask` waits for an answer by default.
 const DEFAULT_ASK_TIMEOUT: u64 = 180;
 
@@ -78,20 +96,44 @@ const REASON_VARIABLE: &str = "ASKPASS_RELAY_REASON";
 /// `SUDO_ASKPASS` as a bare path, so it cannot pass a subcommand.
 const ASK_LINK_NAME: &str = "askpass-relay-ask";
 
+/// Run under this name, the binary is `askpass-relay sudo`.
+const SUDO_LINK_NAME: &str = "rsudo";
+
+/// How long the wrapper waits for the relay to answer a ping.
+const PING_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn main() -> ExitCode {
     let mut args = env::args_os();
     let invoked_as = args.next().map(PathBuf::from);
-    let result = if invoked_as.as_deref().and_then(Path::file_name) == Some(ASK_LINK_NAME.as_ref())
-    {
+    let name = invoked_as.as_deref().and_then(Path::file_name);
+    let result = if name == Some(ASK_LINK_NAME.as_ref()) {
         run_ask(Ask {
             socket: None,
             timeout: DEFAULT_ASK_TIMEOUT,
             prompt: args.map(|arg| arg.to_string_lossy().into_owned()).collect(),
         })
+    } else if name == Some(SUDO_LINK_NAME.as_ref()) {
+        let rest: Vec<String> = args.map(|arg| arg.to_string_lossy().into_owned()).collect();
+        let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+        match Sudo::from_args(&[SUDO_LINK_NAME], &rest) {
+            Ok(sudo) => run_sudo(sudo),
+            Err(early) => {
+                let status = early
+                    .status
+                    .map_or(ExitCode::FAILURE, |()| ExitCode::SUCCESS);
+                if early.status.is_ok() {
+                    println!("{}", early.output);
+                } else {
+                    eprintln!("{}", early.output);
+                }
+                return status;
+            }
+        }
     } else {
         match argh::from_env::<Cli>().command {
             Subcommand::Serve(serve) => run_serve(serve),
             Subcommand::Ask(ask) => run_ask(ask),
+            Subcommand::Sudo(sudo) => run_sudo(sudo),
         }
     };
     match result {
@@ -126,16 +168,56 @@ fn run_serve(args: Serve) -> Result<()> {
     Ok(())
 }
 
+/// The relay socket on a remote host: the option, `ASKPASS_RELAY_SOCKET`, else
+/// `~/.askpass-relay/sock`.
+fn remote_socket(option: Option<PathBuf>) -> Result<PathBuf> {
+    match option.or_else(|| env::var_os("ASKPASS_RELAY_SOCKET").map(PathBuf::from)) {
+        Some(socket) => Ok(socket),
+        None => Ok(
+            PathBuf::from(env::var_os("HOME").context("HOME is not set")?)
+                .join(".askpass-relay")
+                .join("sock"),
+        ),
+    }
+}
+
+/// Checks the relay before sudo can ask for a password: once sudo runs the askpass program, a
+/// failure counts as a failed login against the host's lockout policy.
+fn run_sudo(args: Sudo) -> Result<()> {
+    anyhow::ensure!(!args.command.is_empty(), "no command to run");
+    let sudo = env::var_os("ASKPASS_RELAY_SUDO").unwrap_or_else(|| "sudo".into());
+    // `sudo -n` fails without authenticating when a password is needed, so it counts nothing.
+    let needs_password = !Command::new(&sudo)
+        .args(["-n", "true"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("cannot run {}", sudo.to_string_lossy()))?
+        .success();
+    if needs_password {
+        let socket = remote_socket(args.socket)?;
+        client::ping(&socket, PING_TIMEOUT).map_err(|error| {
+            anyhow::anyhow!(
+                "sudo was not run: {error}. On the desktop, run `systemctl --user restart \
+                 askpass-relay askpass-relay-forward@<this host's ssh name>`, then try again."
+            )
+        })?;
+    }
+    let mut command = Command::new(&sudo);
+    command.arg("-A").args(&args.command);
+    if let Some(reason) = args.reason {
+        command.env(REASON_VARIABLE, reason);
+    }
+    if env::var_os("SUDO_ASKPASS").is_none() {
+        let askpass = env::current_exe()?.with_file_name(ASK_LINK_NAME);
+        command.env("SUDO_ASKPASS", askpass);
+    }
+    Err(command.exec()).context("cannot run sudo")
+}
+
 fn run_ask(args: Ask) -> Result<()> {
-    let socket = args
-        .socket
-        .or_else(|| env::var_os("ASKPASS_RELAY_SOCKET").map(PathBuf::from));
-    let socket = match socket {
-        Some(socket) => socket,
-        None => PathBuf::from(env::var_os("HOME").context("HOME is not set")?)
-            .join(".askpass-relay")
-            .join("sock"),
-    };
+    let socket = remote_socket(args.socket)?;
     let request = Request {
         host: client::host_name(),
         user: client::user_name(),

@@ -1,6 +1,11 @@
 # Environment variable names that appear in argh help text, where literal backticks would leak.
 # The trailing ".." keeps clippy's built-in defaults.
-doc-valid-idents = ["SUDO_ASKPASS", "ASKPASS_RELAY_SOCKET", ".."]
+doc-valid-idents = [
+    "SUDO_ASKPASS",
+    "ASKPASS_RELAY_SOCKET",
+    "ASKPASS_RELAY_REASON",
+    "..",
+]
 
 # Code complexity. Complexity and length keep clippy's defaults, written out so a reader sees
 # what the gate holds a function to. `excessive_nesting` reports nothing until a threshold is

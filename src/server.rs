@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::assuan::{Outcome, PromptText};
 use crate::dialog::Dialog;
-use crate::protocol::{self, Request, Response};
+use crate::protocol::{self, Message, Request, Response};
 
 /// Writes a log line to stderr (the journal under systemd). A closed stderr does not stop the
 /// relay, so the write result is ignored.
@@ -91,8 +91,9 @@ pub fn serve(listener: &UnixListener, dialog: &Dialog, timeout: Duration) {
 
 fn handle(mut stream: UnixStream, dialog: &Dialog, timeout: Duration) {
     let _ = stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT));
-    let response = match protocol::read_request(&mut stream) {
-        Ok(request) => answer(&request, dialog, timeout),
+    let response = match protocol::read_message(&mut stream) {
+        Ok(Message::Ask(request)) => answer(&request, dialog, timeout),
+        Ok(Message::Ping) => Response::Alive,
         Err(error) => {
             log!("askpass-relay: rejected a malformed request: {error}");
             Response::Failed(format!("malformed request: {error}"))

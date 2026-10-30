@@ -278,3 +278,112 @@ fn caller_reason_reaches_the_dialog() {
         "{desc}"
     );
 }
+
+const FAKE_SUDO: &str = r#"#!/bin/sh
+echo "$* reason=${ASKPASS_RELAY_REASON:-}" >> "$FAKE_SUDO_LOG"
+if [ "$1" = "-n" ]; then
+  [ -n "$FAKE_SUDO_NOPASSWD" ]
+  exit $?
+fi
+exit 0
+"#;
+
+/// Runs the `sudo` wrapper (or the binary under `name`) against `socket` with a fake sudo that
+/// logs every call. `nopasswd` makes `sudo -n true` succeed, as a cached or NOPASSWD sudo does.
+fn wrapper(
+    scratch: &Scratch,
+    program: &Path,
+    socket: &Path,
+    args: &[&str],
+    nopasswd: bool,
+) -> (Output, String) {
+    let sudo = scratch.0.join("fake-sudo");
+    write_executable(&sudo, FAKE_SUDO);
+    let log = scratch.0.join("sudo.log");
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .env("ASKPASS_RELAY_SOCKET", socket)
+        .env("ASKPASS_RELAY_SUDO", &sudo)
+        .env("FAKE_SUDO_LOG", &log)
+        .env_remove("ASKPASS_RELAY_REASON");
+    if nopasswd {
+        command.env("FAKE_SUDO_NOPASSWD", "1");
+    }
+    let output = command.output().expect("run the wrapper");
+    (output, fs::read_to_string(log).unwrap_or_default())
+}
+
+const SUDO_ARGS: &[&str] = &[
+    "sudo",
+    "--reason",
+    "install clang",
+    "--",
+    "pacman",
+    "-S",
+    "clang",
+];
+
+#[test]
+fn wrapper_with_a_dead_relay_never_runs_sudo_for_a_password() {
+    let scratch = Scratch::new();
+    let (output, calls) = wrapper(&scratch, BIN.as_ref(), &scratch.socket(), SUDO_ARGS, false);
+    assert!(!output.status.success());
+    assert_eq!(calls, "-n true reason=\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("sudo was not run"), "{stderr}");
+    assert!(stderr.contains("askpass-relay-forward@"), "{stderr}");
+}
+
+#[test]
+fn wrapper_with_a_stale_socket_never_runs_sudo_for_a_password() {
+    let scratch = Scratch::new();
+    let socket = scratch.socket();
+    fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    drop(UnixListener::bind(&socket).unwrap());
+    let (output, calls) = wrapper(&scratch, BIN.as_ref(), &socket, SUDO_ARGS, false);
+    assert!(!output.status.success());
+    assert_eq!(calls, "-n true reason=\n");
+}
+
+#[test]
+fn wrapper_with_a_live_relay_runs_sudo_with_the_reason_and_no_dialog() {
+    let relay = Relay::start("ok");
+    let socket = relay.scratch.socket();
+    let (output, calls) = wrapper(&relay.scratch, BIN.as_ref(), &socket, SUDO_ARGS, false);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        calls,
+        "-n true reason=\n-A pacman -S clang reason=install clang\n"
+    );
+    assert!(
+        !relay.pinentry_log().contains("GETPIN"),
+        "a ping opened a dialog"
+    );
+}
+
+#[test]
+fn wrapper_runs_sudo_when_no_password_is_needed_even_with_a_dead_relay() {
+    let scratch = Scratch::new();
+    let (output, calls) = wrapper(&scratch, BIN.as_ref(), &scratch.socket(), SUDO_ARGS, true);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        calls,
+        "-n true reason=\n-A pacman -S clang reason=install clang\n"
+    );
+}
+
+#[test]
+fn rsudo_link_takes_the_command_as_its_arguments() {
+    let relay = Relay::start("ok");
+    let link = relay.scratch.0.join("rsudo");
+    symlink(BIN, &link).unwrap();
+    let socket = relay.scratch.socket();
+    let args = ["--reason", "install clang", "pacman", "-S", "clang"];
+    let (output, calls) = wrapper(&relay.scratch, &link, &socket, &args, false);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        calls,
+        "-n true reason=\n-A pacman -S clang reason=install clang\n"
+    );
+}

@@ -23,8 +23,8 @@ pub enum AskError {
     /// A socket file exists, but nothing listens on it. It was removed so the next ssh
     /// connection can forward a live one.
     #[error(
-        "stale relay socket at {0} was removed; reconnect (`ssh -O exit <host>` closes a shared \
-         connection) and retry"
+        "stale relay socket at {0} was removed; restart the forward on the desktop \
+         (`systemctl --user restart askpass-relay-forward@<host>`) and retry"
     )]
     StaleSocket(PathBuf),
     /// The socket could not be reached.
@@ -57,7 +57,36 @@ pub fn ask(
     request: &Request,
     timeout: Duration,
 ) -> Result<Zeroizing<Vec<u8>>, AskError> {
-    let mut stream = match UnixStream::connect(socket) {
+    let mut stream = connect(socket, timeout)?;
+    protocol::write_request(&mut stream, request)?;
+    match protocol::read_response(&mut stream)? {
+        Response::Password(password) => Ok(password),
+        Response::Cancelled => Err(AskError::Cancelled),
+        Response::Failed(reason) => Err(AskError::Failed(reason)),
+        Response::Alive => Err(AskError::Failed("the relay answered a ping".into())),
+    }
+}
+
+/// Checks that the relay answers end to end, through the forwarded socket to `serve`, without a
+/// dialog.
+///
+/// # Errors
+///
+/// See [`AskError`]: a missing or stale socket, a relay that does not answer within `timeout`,
+/// or one that answers something else.
+pub fn ping(socket: &Path, timeout: Duration) -> Result<(), AskError> {
+    let mut stream = connect(socket, timeout)?;
+    protocol::write_ping(&mut stream)?;
+    match protocol::read_response(&mut stream)? {
+        Response::Alive => Ok(()),
+        other => Err(AskError::Failed(format!(
+            "the relay answered a ping with {other:?}"
+        ))),
+    }
+}
+
+fn connect(socket: &Path, timeout: Duration) -> Result<UnixStream, AskError> {
+    let stream = match UnixStream::connect(socket) {
         Ok(stream) => stream,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Err(AskError::NoSocket(socket.to_path_buf()));
@@ -78,12 +107,7 @@ pub fn ask(
         .set_read_timeout(Some(timeout))
         .and_then(|()| stream.set_write_timeout(Some(timeout)))
         .map_err(ProtocolError::Io)?;
-    protocol::write_request(&mut stream, request)?;
-    match protocol::read_response(&mut stream)? {
-        Response::Password(password) => Ok(password),
-        Response::Cancelled => Err(AskError::Cancelled),
-        Response::Failed(reason) => Err(AskError::Failed(reason)),
-    }
+    Ok(stream)
 }
 
 /// The command line of process `pid`, the sudo that runs this askpass program.

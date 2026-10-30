@@ -29,6 +29,8 @@ const KIND_REQUEST: u8 = 1;
 const KIND_PASSWORD: u8 = 2;
 const KIND_CANCELLED: u8 = 3;
 const KIND_FAILED: u8 = 4;
+const KIND_PING: u8 = 5;
+const KIND_ALIVE: u8 = 6;
 
 /// A password request sent by `ask`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +47,15 @@ pub struct Request {
     pub reason: Option<String>,
 }
 
+/// What `ask` or the `sudo` wrapper sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Message {
+    /// Ask for a password with a dialog.
+    Ask(Request),
+    /// Check that the relay answers, without a dialog. Version 2 and later.
+    Ping,
+}
+
 /// The answer `serve` sends back.
 #[derive(PartialEq, Eq)]
 pub enum Response {
@@ -54,6 +65,8 @@ pub enum Response {
     Cancelled,
     /// The relay could not ask; the text says why.
     Failed(String),
+    /// The relay answers a ping.
+    Alive,
 }
 
 impl fmt::Debug for Response {
@@ -62,6 +75,7 @@ impl fmt::Debug for Response {
             Self::Password(_) => f.write_str("Password(<redacted>)"),
             Self::Cancelled => f.write_str("Cancelled"),
             Self::Failed(reason) => f.debug_tuple("Failed").field(reason).finish(),
+            Self::Alive => f.write_str("Alive"),
         }
     }
 }
@@ -116,17 +130,31 @@ pub fn write_request(out: &mut impl Write, request: &Request) -> Result<(), Prot
     write_frame(out, &payload)
 }
 
-/// Reads a request frame.
+/// Writes a ping frame.
+///
+/// # Errors
+///
+/// Fails when the stream fails.
+pub fn write_ping(out: &mut impl Write) -> Result<(), ProtocolError> {
+    write_frame(out, &[REQUEST_VERSION, KIND_PING])
+}
+
+/// Reads a request or a ping.
 ///
 /// # Errors
 ///
 /// Fails on a malformed frame (see [`ProtocolError`]) or when the stream fails.
-pub fn read_request(input: &mut impl Read) -> Result<Request, ProtocolError> {
+pub fn read_message(input: &mut impl Read) -> Result<Message, ProtocolError> {
     let payload = read_frame(input)?;
-    let mut fields = Fields::new(&payload, 1..=REQUEST_VERSION)?;
-    if fields.kind != KIND_REQUEST {
-        return Err(ProtocolError::UnexpectedKind(fields.kind));
+    let fields = Fields::new(&payload, 1..=REQUEST_VERSION)?;
+    match fields.kind {
+        KIND_REQUEST => read_request(fields).map(Message::Ask),
+        KIND_PING if fields.version >= 2 => fields.finish().map(|()| Message::Ping),
+        other => Err(ProtocolError::UnexpectedKind(other)),
     }
+}
+
+fn read_request(mut fields: Fields<'_>) -> Result<Request, ProtocolError> {
     let request = Request {
         host: fields.text()?,
         user: fields.text()?,
@@ -156,6 +184,7 @@ pub fn write_response(out: &mut impl Write, response: &Response) -> Result<(), P
             push_field(&mut payload, password)?;
         }
         Response::Cancelled => payload.extend_from_slice(&[RESPONSE_VERSION, KIND_CANCELLED]),
+        Response::Alive => payload.extend_from_slice(&[RESPONSE_VERSION, KIND_ALIVE]),
         Response::Failed(reason) => {
             payload.extend_from_slice(&[RESPONSE_VERSION, KIND_FAILED]);
             push_field(&mut payload, reason.as_bytes())?;
@@ -176,6 +205,7 @@ pub fn read_response(input: &mut impl Read) -> Result<Response, ProtocolError> {
         KIND_PASSWORD => Response::Password(Zeroizing::new(fields.bytes()?.to_vec())),
         KIND_CANCELLED => Response::Cancelled,
         KIND_FAILED => Response::Failed(fields.text()?),
+        KIND_ALIVE => Response::Alive,
         other => return Err(ProtocolError::UnexpectedKind(other)),
     };
     fields.finish()?;
@@ -278,6 +308,38 @@ mod tests {
         }
     }
 
+    fn read_request(input: &mut &[u8]) -> Result<Request, ProtocolError> {
+        match read_message(input)? {
+            Message::Ask(request) => Ok(request),
+            Message::Ping => panic!("expected a request, read a ping"),
+        }
+    }
+
+    #[test]
+    fn ping_frame_layout_is_stable() {
+        let mut wire = Vec::new();
+        write_ping(&mut wire).unwrap();
+        assert_eq!(wire, frame(&[2, KIND_PING]));
+        assert_eq!(read_message(&mut wire.as_slice()).unwrap(), Message::Ping);
+    }
+
+    #[test]
+    fn version_1_has_no_ping() {
+        let wire = frame(&[1, KIND_PING]);
+        let error = read_message(&mut wire.as_slice()).unwrap_err();
+        assert!(
+            matches!(error, ProtocolError::UnexpectedKind(KIND_PING)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn ping_with_fields_is_rejected() {
+        let wire = frame(&[2, KIND_PING, 0]);
+        let error = read_message(&mut wire.as_slice()).unwrap_err();
+        assert!(matches!(error, ProtocolError::TrailingBytes), "{error:?}");
+    }
+
     fn frame(payload: &[u8]) -> Vec<u8> {
         let mut out = u32::try_from(payload.len()).unwrap().to_be_bytes().to_vec();
         out.extend_from_slice(payload);
@@ -297,6 +359,7 @@ mod tests {
             Response::Password(Zeroizing::new(b"p@ss word\nwith newline".to_vec())),
             Response::Cancelled,
             Response::Failed("no display".into()),
+            Response::Alive,
         ] {
             let mut wire = Vec::new();
             write_response(&mut wire, &response).unwrap();

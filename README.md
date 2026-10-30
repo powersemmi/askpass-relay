@@ -1,6 +1,6 @@
 # askpass-relay
 
-`askpass-relay` lets a non-interactive `ssh host 'sudo -A ...'` ask for the sudo password in a
+`askpass-relay` lets a non-interactive `ssh host 'rsudo ...'` ask for the sudo password in a
 dialog on your desktop. sudo on the remote host runs `askpass-relay-ask` as its askpass program.
 It sends the request over a unix socket that ssh forwards back to your desktop. There
 `askpass-relay serve` shows a pinentry dialog that asks for the password of that account on that
@@ -9,6 +9,7 @@ host and names the command, and returns the password you type, or a cancel.
 ```mermaid
 sequenceDiagram
     box Remote host
+        participant rsudo as rsudo cmd
         participant sudo as sudo -A cmd
         participant ask as askpass-relay-ask
     end
@@ -16,8 +17,11 @@ sequenceDiagram
         participant serve as askpass-relay serve
         participant dialog as pinentry dialog
     end
+    rsudo->>serve: ping over ~/.askpass-relay/sock<br/>(forwarded by ssh RemoteForward)
+    serve-->>rsudo: alive, with no dialog
+    rsudo->>sudo: exec, only once the relay answered
     sudo->>ask: run as SUDO_ASKPASS with the prompt
-    ask->>serve: request over ~/.askpass-relay/sock<br/>(forwarded by ssh RemoteForward)
+    ask->>serve: request over the same socket
     serve->>dialog: ask for the password of user@host
     dialog-->>serve: password, or cancel
     serve-->>ask: password, or cancel
@@ -42,9 +46,10 @@ sequenceDiagram
 Each message is one frame: a big-endian `u32` payload length, then the payload. The payload is
 the protocol version, a message kind, and fields, each a big-endian `u16` length and its bytes.
 A request (version 2) carries the host, the user, sudo's prompt, the command line of the sudo
-process and the caller's reason, empty when there is none. The relay also reads version 1
-requests, which have no reason. The answer (version 1) is a password, a cancel, or a failure
-with its reason. Frames over 64 KiB, another version, an unknown kind, a missing field or
+process and the caller's reason, empty when there is none. A ping (version 2, no fields) asks
+the relay to answer without a dialog. The relay also reads version 1 requests, which have no
+reason. The answer (version 1) is a password, a cancel, a failure with its reason, or the
+answer to a ping. Frames over 64 KiB, another version, an unknown kind, a missing field or
 trailing bytes are rejected.
 
 ## Install on the desktop
@@ -63,38 +68,58 @@ The unit starts with the graphical session, so the dialog finds the Wayland or X
 
 ## The ssh configuration
 
-Add a block per host to `~/.ssh/config` on the desktop. The remote path is absolute, because
-sshd resolves no `~` in a forwarded socket path. Replace `1000` with your uid (`id -u`).
+One dedicated ssh connection per host carries the socket. Add an alias per host to
+`~/.ssh/config` on the desktop. The remote path is absolute, because sshd resolves no `~` in a
+forwarded socket path. Replace `1000` with your uid (`id -u`).
 
 ```sshconfig
-Host pro
+Host askpass-relay-pro
+    HostName pro.example
+    User remote-user
     RemoteForward /home/remote-user/.askpass-relay/sock /run/user/1000/askpass-relay/sock
 
-Host air
+Host askpass-relay-air
+    HostName air.example
+    User remote-user
     RemoteForward /Users/remote-user/.askpass-relay/sock /run/user/1000/askpass-relay/sock
 
-Host pro air
-    StreamLocalBindUnlink yes
+Host askpass-relay-*
+    ControlMaster no
+    ControlPath none
+    ExitOnForwardFailure yes
+    ServerAliveInterval 15
+    ServerAliveCountMax 3
 ```
 
-A shared connection (`ControlMaster`) carries the forward for every command that reuses it.
+A user unit keeps each connection up and restarts it when it drops:
 
-sshd leaves the forwarded socket file behind when a connection closes. The next connection then
-cannot bind it, and a shared connection never retries. Set `StreamLocalBindUnlink yes` in the
-remote sshd, so that each new connection replaces the old file (see below). On a host without
-it, `ask` removes a stale socket it finds and fails; the next new connection forwards a live one
-(`ssh -O exit <host>` closes a shared connection).
+```sh
+cp contrib/askpass-relay-forward@.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now askpass-relay-forward@pro askpass-relay-forward@air
+```
+
+The everyday `Host pro` and `Host air` entries carry no forward. A connection that requests the
+forward binds the remote socket in place of the one before it, and when that connection closes
+it leaves the file behind with nothing listening. Only the dedicated connection requests it, so
+an agent's own connections, shared or not, never take the socket over.
+
+sshd leaves the socket file behind when a connection closes. With `StreamLocalBindUnlink yes` in
+the remote sshd (see below), a restarted forward replaces it. On a host without it, `ask` removes
+a stale socket it finds, and the next start of the forward binds a live one.
 
 ## Install on a remote host
 
 ```sh
 git archive HEAD | ssh host 'mkdir -p ~/src/askpass-relay && tar -x -C ~/src/askpass-relay'
 ssh host 'cd ~/src/askpass-relay && cargo install --locked --path .'
-ssh host 'mkdir -p -m 700 ~/.askpass-relay && ln -sf askpass-relay ~/.cargo/bin/askpass-relay-ask'
+ssh host 'mkdir -p -m 700 ~/.askpass-relay && cd ~/.cargo/bin \
+  && ln -sf askpass-relay askpass-relay-ask && ln -sf askpass-relay rsudo'
 ```
 
 sudo runs `SUDO_ASKPASS` as a bare path with the prompt as its only argument. Under the name
-`askpass-relay-ask` the binary acts as `askpass-relay ask`.
+`askpass-relay-ask` the binary acts as `askpass-relay ask`, and under the name `rsudo` it acts as
+`askpass-relay sudo`.
 
 Export `SUDO_ASKPASS` in the file the remote login shell reads for non-interactive ssh commands.
 For zsh that is `~/.zshenv` (with a custom `ZDOTDIR`, `$ZDOTDIR/.zshenv`); for bash it is
@@ -115,15 +140,22 @@ ssh host 'sudo -A systemctl reload sshd'       # Linux; macOS reads it on the ne
 ## Use from an agent or a script
 
 ```sh
-ssh pro 'sudo -A pacman -Syu --noconfirm'
-ssh air 'sudo -A -k true && echo ok'
+ssh pro 'rsudo --reason "install docker for the live stands" pacman -S --noconfirm docker'
+ssh air 'askpass-relay sudo --reason "check the relay" -- true'
 ```
+
+`rsudo` runs `sudo -A` with the command, after a check that the password can reach a dialog. When
+sudo needs a password (`sudo -n true` fails), it pings the relay through the socket: the desktop
+answers without a dialog. When the relay does not answer, `rsudo` exits with status 1 and the
+fix, and sudo never runs. This matters because once sudo has started the askpass program, a
+failure counts as a failed login against the host's lockout policy.
 
 The desktop shows a dialog. Approve it, and the command runs. Cancel it, and sudo exits with an
 error at once.
 
-The dialog is titled "sudo password for <user>@<host>" and shows the command that asked. A
-caller says why it needs root with `ASKPASS_RELAY_REASON`:
+The dialog is titled "sudo password for <user>@<host>" and shows the command that asked. The
+reason comes from `--reason` or from `ASKPASS_RELAY_REASON`; plain `sudo -A` reads the variable
+too:
 
 ```sh
 ssh pro 'ASKPASS_RELAY_REASON="install docker for the live stands" sudo -A pacman -S docker'
