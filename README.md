@@ -78,7 +78,7 @@ it, `ask` removes a stale socket it finds and fails; the next new connection for
 ## Install on a remote host
 
 ```sh
-rsync -a --exclude target --exclude .git ./ host:src/askpass-relay/
+git archive HEAD | ssh host 'mkdir -p ~/src/askpass-relay && tar -x -C ~/src/askpass-relay'
 ssh host 'cd ~/src/askpass-relay && cargo install --locked --path .'
 ssh host 'mkdir -p -m 700 ~/.askpass-relay && ln -sf askpass-relay ~/.cargo/bin/askpass-relay-ask'
 ```
