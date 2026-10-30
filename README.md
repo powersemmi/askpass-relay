@@ -6,14 +6,22 @@ It sends the request over a unix socket that ssh forwards back to your desktop. 
 `askpass-relay serve` shows a pinentry dialog that asks for the password of that account on that
 host and names the command, and returns the password you type, or a cancel.
 
-```text
-remote host                                   desktop
-sudo -A cmd
-  -> askpass-relay-ask "<prompt>"
-       ~/.askpass-relay/sock  == ssh RemoteForward ==>  $XDG_RUNTIME_DIR/askpass-relay/sock
-                                                          askpass-relay serve
-                                                            -> pinentry-gnome3 dialog
-  <- password on stdout, or exit 1               <-
+```mermaid
+sequenceDiagram
+    box Remote host
+        participant sudo as sudo -A cmd
+        participant ask as askpass-relay-ask
+    end
+    box Desktop
+        participant serve as askpass-relay serve
+        participant dialog as pinentry dialog
+    end
+    sudo->>ask: run as SUDO_ASKPASS with the prompt
+    ask->>serve: request over ~/.askpass-relay/sock<br/>(forwarded by ssh RemoteForward)
+    serve->>dialog: ask for the password of user@host
+    dialog-->>serve: password, or cancel
+    serve-->>ask: password, or cancel
+    ask-->>sudo: password on stdout, or exit 1
 ```
 
 ## Behaviour
