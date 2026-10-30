@@ -156,21 +156,21 @@ mod tests {
     fn description_names_host_user_command_and_prompt() {
         let text = describe(&Request {
             host: "air".into(),
-            user: "moloko".into(),
+            user: "alice".into(),
             prompt: "Password: ".into(),
             command: "sudo -A true".into(),
         });
-        assert_eq!(text.title, "sudo password for moloko@air");
+        assert_eq!(text.title, "sudo password for alice@air");
         assert_eq!(
             text.description,
-            "Enter the login password of the account moloko on the host air. \
+            "Enter the login password of the account alice on the host air. \
              sudo on air asks for it to run this command:\n\n\
              sudo -A true\n\n\
              Each wrong password counts as a failed login on air; a host with a lockout \
              policy locks the account after as few as 3. \
              Cancel if you did not expect this command."
         );
-        assert_eq!(text.prompt, "Password of moloko@air:");
+        assert_eq!(text.prompt, "Password of alice@air:");
     }
 
     #[test]

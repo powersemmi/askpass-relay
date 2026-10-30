@@ -248,8 +248,8 @@ mod tests {
     fn request() -> Request {
         Request {
             host: "pro".into(),
-            user: "moloko".into(),
-            prompt: "[sudo] password for moloko: ".into(),
+            user: "alice".into(),
+            prompt: "[sudo] password for alice: ".into(),
             command: "sudo -A pacman -Syu".into(),
         }
     }

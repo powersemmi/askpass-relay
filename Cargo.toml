@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Relays sudo -A password prompts from remote hosts to a desktop dialog"
+license = "Apache-2.0"
+repository = "https://github.com/powersemmi/askpass-relay"
 publish = false
 
 [dependencies]

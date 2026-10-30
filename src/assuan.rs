@@ -261,7 +261,7 @@ mod tests {
     fn text() -> PromptText {
         PromptText {
             title: "sudo on pro".into(),
-            description: "moloko@pro runs\nsudo -A true (100%)".into(),
+            description: "alice@pro runs\nsudo -A true (100%)".into(),
             prompt: "Password:".into(),
         }
     }
@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(
             sent,
             "SETTITLE sudo on pro\n\
-             SETDESC moloko@pro runs%0Asudo -A true (100%25)\n\
+             SETDESC alice@pro runs%0Asudo -A true (100%25)\n\
              SETPROMPT Password:\n\
              SETTIMEOUT 60\n\
              GETPIN\n\
