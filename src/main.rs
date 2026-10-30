@@ -1,5 +1,7 @@
+//! The `askpass-relay` command: `serve` on the desktop, `ask` on a remote host.
 #![forbid(unsafe_code)]
 
+use std::env;
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
@@ -34,19 +36,19 @@ enum Subcommand {
 #[derive(FromArgs)]
 #[argh(subcommand, name = "serve")]
 struct Serve {
-    /// the socket to listen on (default: $XDG_RUNTIME_DIR/askpass-relay/sock)
+    /// the socket to listen on (default: $XDG_RUNTIME_DIR/askpass-relay/sock).
     #[argh(option)]
     socket: Option<PathBuf>,
-    /// the pinentry program (default: pinentry-gnome3)
+    /// the pinentry program (default: pinentry-gnome3).
     #[argh(option, default = "PathBuf::from(\"pinentry-gnome3\")")]
     pinentry: PathBuf,
-    /// the fallback dialog program, run as zenity (default: zenity)
+    /// the fallback dialog program, run as zenity (default: zenity).
     #[argh(option, default = "PathBuf::from(\"zenity\")")]
     fallback: PathBuf,
-    /// use no fallback dialog
+    /// use no fallback dialog.
     #[argh(switch)]
     no_fallback: bool,
-    /// seconds a dialog waits for an answer before it counts as a cancel (default: 60)
+    /// seconds a dialog waits for an answer before it counts as a cancel (default: 60).
     #[argh(option, default = "60")]
     timeout: u64,
 }
@@ -55,13 +57,13 @@ struct Serve {
 #[derive(FromArgs)]
 #[argh(subcommand, name = "ask")]
 struct Ask {
-    /// the relay socket (default: $ASKPASS_RELAY_SOCKET, else ~/.askpass-relay/sock)
+    /// the relay socket (default: $ASKPASS_RELAY_SOCKET, else ~/.askpass-relay/sock).
     #[argh(option)]
     socket: Option<PathBuf>,
-    /// seconds to wait for an answer (default: 180)
+    /// seconds to wait for an answer (default: 180).
     #[argh(option, default = "DEFAULT_ASK_TIMEOUT")]
     timeout: u64,
-    /// the prompt sudo passes
+    /// the prompt sudo passes.
     #[argh(positional, greedy)]
     prompt: Vec<String>,
 }
@@ -74,7 +76,7 @@ const DEFAULT_ASK_TIMEOUT: u64 = 180;
 const ASK_LINK_NAME: &str = "askpass-relay-ask";
 
 fn main() -> ExitCode {
-    let mut args = std::env::args_os();
+    let mut args = env::args_os();
     let invoked_as = args.next().map(PathBuf::from);
     let result = if invoked_as.as_deref().and_then(Path::file_name) == Some(ASK_LINK_NAME.as_ref())
     {
@@ -101,11 +103,11 @@ fn main() -> ExitCode {
 fn run_serve(args: Serve) -> Result<()> {
     let socket = match args.socket {
         Some(socket) => socket,
-        None => PathBuf::from(
-            std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?,
-        )
-        .join("askpass-relay")
-        .join("sock"),
+        None => {
+            PathBuf::from(env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?)
+                .join("askpass-relay")
+                .join("sock")
+        }
     };
     let mut programs = vec![DialogProgram::Pinentry(args.pinentry)];
     if !args.no_fallback {
@@ -124,10 +126,10 @@ fn run_serve(args: Serve) -> Result<()> {
 fn run_ask(args: Ask) -> Result<()> {
     let socket = args
         .socket
-        .or_else(|| std::env::var_os("ASKPASS_RELAY_SOCKET").map(PathBuf::from));
+        .or_else(|| env::var_os("ASKPASS_RELAY_SOCKET").map(PathBuf::from));
     let socket = match socket {
         Some(socket) => socket,
-        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?)
+        None => PathBuf::from(env::var_os("HOME").context("HOME is not set")?)
             .join(".askpass-relay")
             .join("sock"),
     };

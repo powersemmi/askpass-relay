@@ -1,13 +1,13 @@
 //! Runs `serve` with a fake pinentry and `ask` against it through a real unix socket.
 
-use std::fs;
-use std::io::{BufRead, BufReader};
-use std::os::unix::fs::PermissionsExt;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+use std::{env, fs, process};
 
 use askpass_relay::protocol::{self, Response};
 
@@ -37,12 +37,12 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = env::temp_dir().join(format!(
             "askpass-relay-test-{}-{}",
-            std::process::id(),
+            process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&dir).expect("create the scratch directory");
         Self(dir)
     }
 
@@ -67,8 +67,9 @@ impl Relay {
     fn start(mode: &str) -> Self {
         let scratch = Scratch::new();
         let pinentry = scratch.0.join("fake-pinentry");
-        fs::write(&pinentry, FAKE_PINENTRY).unwrap();
-        fs::set_permissions(&pinentry, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&pinentry, FAKE_PINENTRY).expect("write the fake pinentry");
+        fs::set_permissions(&pinentry, fs::Permissions::from_mode(0o700))
+            .expect("make the fake pinentry executable");
         let mut child = Command::new(BIN)
             .args(["serve", "--no-fallback", "--timeout", "1", "--socket"])
             .arg(scratch.socket())
@@ -78,10 +79,12 @@ impl Relay {
             .env("FAKE_PINENTRY_LOG", scratch.0.join("pinentry.log"))
             .stderr(Stdio::piped())
             .spawn()
-            .unwrap();
+            .expect("start serve");
         let mut first = String::new();
-        let mut stderr = BufReader::new(child.stderr.take().unwrap());
-        stderr.read_line(&mut first).unwrap();
+        let mut stderr = BufReader::new(child.stderr.take().expect("serve stderr is piped"));
+        stderr
+            .read_line(&mut first)
+            .expect("read the first line of serve");
         assert!(
             first.contains("listening on"),
             "serve did not start: {first:?}"
@@ -110,7 +113,7 @@ fn ask(socket: &Path) -> Output {
         .args(["ask", PROMPT])
         .env("ASKPASS_RELAY_SOCKET", socket)
         .output()
-        .unwrap()
+        .expect("run ask")
 }
 
 #[test]
@@ -129,8 +132,8 @@ fn dialog_names_the_host_the_user_and_the_command() {
     let desc = log.lines().find(|l| l.starts_with("SETDESC ")).unwrap();
     let host = Command::new("uname").arg("-n").output().unwrap().stdout;
     let host = String::from_utf8(host).unwrap();
-    let user = std::env::var("USER").unwrap();
-    let me = std::env::current_exe().unwrap();
+    let user = env::var("USER").unwrap();
+    let me = env::current_exe().unwrap();
     let me = me.file_name().unwrap().to_str().unwrap();
     assert!(desc.contains(host.trim()), "{desc}");
     assert!(desc.contains(&user), "{desc}");
@@ -159,7 +162,7 @@ fn cancelled_dialog_fails_with_no_output() {
     let relay = Relay::start("cancel");
     let output = ask(&relay.scratch.socket());
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(String::from_utf8_lossy(&output.stderr).contains("cancelled"));
 }
 
@@ -169,7 +172,7 @@ fn unanswered_dialog_times_out_as_a_cancel() {
     let started = Instant::now();
     let output = ask(&relay.scratch.socket());
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(
         started.elapsed() < Duration::from_secs(10),
         "{:?}",
@@ -185,7 +188,7 @@ fn missing_socket_fails_at_once() {
     let started = Instant::now();
     let output = ask(&scratch.socket());
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(String::from_utf8_lossy(&output.stderr).contains("not running"));
 }
@@ -206,7 +209,7 @@ fn stale_socket_fails_and_is_removed() {
 fn malformed_frame_is_rejected_and_the_relay_keeps_serving() {
     let relay = Relay::start("ok");
     let mut stream = UnixStream::connect(relay.scratch.socket()).unwrap();
-    std::io::Write::write_all(&mut stream, &[0, 0, 0, 2, 9, 9]).unwrap();
+    stream.write_all(&[0, 0, 0, 2, 9, 9]).unwrap();
     let response = protocol::read_response(&mut stream).unwrap();
     assert!(matches!(response, Response::Failed(_)), "{response:?}");
     assert_eq!(ask(&relay.scratch.socket()).stdout, b"hunter%2\n");
@@ -228,7 +231,7 @@ fn second_relay_on_a_live_socket_refuses_to_start() {
 fn askpass_link_name_runs_ask_with_the_prompt_as_its_only_argument() {
     let relay = Relay::start("ok");
     let link = relay.scratch.0.join("askpass-relay-ask");
-    std::os::unix::fs::symlink(BIN, &link).unwrap();
+    symlink(BIN, &link).unwrap();
     let output = Command::new(&link)
         .arg(PROMPT)
         .env("ASKPASS_RELAY_SOCKET", relay.scratch.socket())

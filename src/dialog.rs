@@ -2,7 +2,7 @@
 
 use std::io::{self, Read};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -50,7 +50,7 @@ enum ProgramError {
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
     #[error("exited with {0}")]
-    Exit(std::process::ExitStatus),
+    Exit(ExitStatus),
 }
 
 impl Dialog {
@@ -166,12 +166,11 @@ fn with_deadline<T: Send + 'static>(
     thread::spawn(move || {
         let _ = sender.send(work());
     });
-    if let Ok(answer) = receiver.recv_timeout(timeout) {
-        Some(answer)
-    } else {
+    let answer = receiver.recv_timeout(timeout).ok();
+    if answer.is_none() {
         reap(child);
-        None
     }
+    answer
 }
 
 fn reap(child: &mut Child) {
@@ -194,10 +193,10 @@ fn pango_escape(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::time::Instant;
+    use std::{env, fs, process};
 
     use super::*;
 
@@ -217,10 +216,7 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "askpass-relay-dialog-{name}-{}",
-            std::process::id()
-        ));
+        let dir = env::temp_dir().join(format!("askpass-relay-dialog-{name}-{}", process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

@@ -1,5 +1,6 @@
 //! The remote side: sends one request over the forwarded socket and returns the answer.
 
+use std::env;
 use std::fs;
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -112,8 +113,8 @@ pub fn host_name() -> String {
 /// The name of the user this program runs as.
 #[must_use]
 pub fn user_name() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
+    env::var("USER")
+        .or_else(|_| env::var("LOGNAME"))
         .ok()
         .filter(|name| !name.is_empty())
         .or_else(|| run(Command::new("id").arg("-un")))
@@ -128,19 +129,21 @@ fn run(command: &mut Command) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::process;
+
     use super::*;
 
     #[test]
     fn command_line_lists_the_program_and_its_arguments() {
-        let line = command_line(std::process::id());
-        let me = std::env::current_exe().unwrap();
+        let line = command_line(process::id());
+        let me = env::current_exe().unwrap();
         let me = me.file_name().unwrap().to_str().unwrap();
         assert!(line.contains(me), "{line}");
     }
 
     #[test]
     fn host_and_user_are_known() {
-        assert!(!host_name().is_empty());
-        assert!(!user_name().is_empty());
+        assert_ne!(host_name(), "");
+        assert_ne!(user_name(), "");
     }
 }

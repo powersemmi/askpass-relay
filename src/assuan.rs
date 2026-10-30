@@ -3,7 +3,9 @@
 //! The conversation is short: the greeting, a few `SET*` commands, `GETPIN`, `BYE`. The PIN
 //! arrives percent-encoded on a `D` line; every buffer that holds it is wiped on drop.
 
+use std::fmt;
 use std::io::{self, Read, Write};
+use std::str;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -38,8 +40,8 @@ pub enum Outcome {
     TimedOut,
 }
 
-impl std::fmt::Debug for Outcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Outcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Password(_) => f.write_str("Password(<redacted>)"),
             Self::Cancelled => f.write_str("Cancelled"),
@@ -106,7 +108,7 @@ pub fn unescape(data: &[u8]) -> Result<Zeroizing<Vec<u8>>, AssuanError> {
                     "invalid escape in data line".into(),
                 ));
             };
-            out.push(hi << 4 | lo);
+            out.push((hi << 4) | lo);
         } else {
             out.push(byte);
         }
@@ -201,7 +203,7 @@ fn is_status(line: &[u8]) -> bool {
 fn error_code(line: &[u8]) -> Option<u32> {
     let rest = line.strip_prefix(b"ERR ")?;
     let code = rest.split(|&b| b == b' ').next()?;
-    let code: u32 = std::str::from_utf8(code).ok()?.parse().ok()?;
+    let code: u32 = str::from_utf8(code).ok()?.parse().ok()?;
     // The low 16 bits are the error code; the high bits name the source.
     Some(code & 0xffff)
 }
