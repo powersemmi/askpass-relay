@@ -4,15 +4,23 @@
 //! starts with the protocol version and a message kind, followed by fields, each a big-endian
 //! `u16` length and that many bytes. A frame that is longer than [`MAX_FRAME`], names an unknown
 //! version or kind, carries the wrong number of fields or leaves bytes over is rejected.
+//!
+//! A request is written at [`REQUEST_VERSION`] 2, which adds the reason field; a version 1
+//! request (without it) is still read. The answer has not changed since version 1, so it stays at
+//! [`RESPONSE_VERSION`] 1 and an `ask` of either version reads it.
 
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::ops::RangeInclusive;
 
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-/// The protocol version both sides speak.
-pub const VERSION: u8 = 1;
+/// The version a request is written at.
+pub const REQUEST_VERSION: u8 = 2;
+
+/// The version an answer is written at.
+pub const RESPONSE_VERSION: u8 = 1;
 
 /// The largest payload either side accepts.
 pub const MAX_FRAME: usize = 64 * 1024;
@@ -33,6 +41,8 @@ pub struct Request {
     pub prompt: String,
     /// The command line of the sudo process that asked.
     pub command: String,
+    /// Why the caller runs the command, from `ASKPASS_RELAY_REASON`.
+    pub reason: Option<String>,
 }
 
 /// The answer `serve` sends back.
@@ -92,12 +102,14 @@ pub enum ProtocolError {
 ///
 /// Fails when a field is longer than 65535 bytes or the stream fails.
 pub fn write_request(out: &mut impl Write, request: &Request) -> Result<(), ProtocolError> {
-    let mut payload = vec![VERSION, KIND_REQUEST];
+    let mut payload = vec![REQUEST_VERSION, KIND_REQUEST];
+    let reason = request.reason.as_deref().unwrap_or_default();
     for field in [
         &request.host,
         &request.user,
         &request.prompt,
         &request.command,
+        reason,
     ] {
         push_field(&mut payload, field.as_bytes())?;
     }
@@ -111,7 +123,7 @@ pub fn write_request(out: &mut impl Write, request: &Request) -> Result<(), Prot
 /// Fails on a malformed frame (see [`ProtocolError`]) or when the stream fails.
 pub fn read_request(input: &mut impl Read) -> Result<Request, ProtocolError> {
     let payload = read_frame(input)?;
-    let mut fields = Fields::new(&payload)?;
+    let mut fields = Fields::new(&payload, 1..=REQUEST_VERSION)?;
     if fields.kind != KIND_REQUEST {
         return Err(ProtocolError::UnexpectedKind(fields.kind));
     }
@@ -120,6 +132,12 @@ pub fn read_request(input: &mut impl Read) -> Result<Request, ProtocolError> {
         user: fields.text()?,
         prompt: fields.text()?,
         command: fields.text()?,
+        // Version 1 has no reason field; an empty one means no reason.
+        reason: if fields.version >= 2 {
+            Some(fields.text()?).filter(|reason| !reason.is_empty())
+        } else {
+            None
+        },
     };
     fields.finish()?;
     Ok(request)
@@ -134,12 +152,12 @@ pub fn write_response(out: &mut impl Write, response: &Response) -> Result<(), P
     let mut payload = Zeroizing::new(Vec::with_capacity(512));
     match response {
         Response::Password(password) => {
-            payload.extend_from_slice(&[VERSION, KIND_PASSWORD]);
+            payload.extend_from_slice(&[RESPONSE_VERSION, KIND_PASSWORD]);
             push_field(&mut payload, password)?;
         }
-        Response::Cancelled => payload.extend_from_slice(&[VERSION, KIND_CANCELLED]),
+        Response::Cancelled => payload.extend_from_slice(&[RESPONSE_VERSION, KIND_CANCELLED]),
         Response::Failed(reason) => {
-            payload.extend_from_slice(&[VERSION, KIND_FAILED]);
+            payload.extend_from_slice(&[RESPONSE_VERSION, KIND_FAILED]);
             push_field(&mut payload, reason.as_bytes())?;
         }
     }
@@ -153,7 +171,7 @@ pub fn write_response(out: &mut impl Write, response: &Response) -> Result<(), P
 /// Fails on a malformed frame (see [`ProtocolError`]) or when the stream fails.
 pub fn read_response(input: &mut impl Read) -> Result<Response, ProtocolError> {
     let payload = read_frame(input)?;
-    let mut fields = Fields::new(&payload)?;
+    let mut fields = Fields::new(&payload, RESPONSE_VERSION..=RESPONSE_VERSION)?;
     let response = match fields.kind {
         KIND_PASSWORD => Response::Password(Zeroizing::new(fields.bytes()?.to_vec())),
         KIND_CANCELLED => Response::Cancelled,
@@ -201,14 +219,19 @@ fn read_frame(input: &mut impl Read) -> Result<Zeroizing<Vec<u8>>, ProtocolError
 }
 
 struct Fields<'a> {
+    version: u8,
     kind: u8,
     rest: &'a [u8],
 }
 
 impl<'a> Fields<'a> {
-    fn new(payload: &'a [u8]) -> Result<Self, ProtocolError> {
+    fn new(payload: &'a [u8], accepted: RangeInclusive<u8>) -> Result<Self, ProtocolError> {
         match payload {
-            [VERSION, kind, rest @ ..] => Ok(Self { kind: *kind, rest }),
+            [version, kind, rest @ ..] if accepted.contains(version) => Ok(Self {
+                version: *version,
+                kind: *kind,
+                rest,
+            }),
             [version, _, ..] => Err(ProtocolError::UnsupportedVersion(*version)),
             _ => Err(ProtocolError::Truncated),
         }
@@ -251,6 +274,7 @@ mod tests {
             user: "alice".into(),
             prompt: "[sudo] password for alice: ".into(),
             command: "sudo -A pacman -Syu".into(),
+            reason: Some("update the build host".into()),
         }
     }
 
@@ -288,10 +312,44 @@ mod tests {
             user: "u".into(),
             prompt: String::new(),
             command: "c".into(),
+            reason: Some("r".into()),
         };
         write_request(&mut wire, &request).unwrap();
-        let expected = frame(&[1, 1, 0, 1, b'h', 0, 1, b'u', 0, 0, 0, 1, b'c']);
+        let expected = frame(&[2, 1, 0, 1, b'h', 0, 1, b'u', 0, 0, 0, 1, b'c', 0, 1, b'r']);
         assert_eq!(wire, expected);
+    }
+
+    #[test]
+    fn request_without_a_reason_round_trips() {
+        let request = Request {
+            reason: None,
+            ..request()
+        };
+        let mut wire = Vec::new();
+        write_request(&mut wire, &request).unwrap();
+        assert_eq!(read_request(&mut wire.as_slice()).unwrap(), request);
+    }
+
+    #[test]
+    fn version_1_request_is_accepted_without_a_reason() {
+        let wire = frame(&[1, 1, 0, 1, b'h', 0, 1, b'u', 0, 0, 0, 1, b'c']);
+        let request = read_request(&mut wire.as_slice()).unwrap();
+        assert_eq!(request.command, "c");
+        assert_eq!(request.reason, None);
+    }
+
+    #[test]
+    fn version_2_request_without_the_reason_field_is_truncated() {
+        let wire = frame(&[2, 1, 0, 1, b'h', 0, 1, b'u', 0, 0, 0, 1, b'c']);
+        let error = read_request(&mut wire.as_slice()).unwrap_err();
+        assert!(matches!(error, ProtocolError::Truncated), "{error:?}");
+    }
+
+    #[test]
+    fn response_frame_stays_at_version_1() {
+        let mut wire = Vec::new();
+        write_response(&mut wire, &Response::Cancelled).unwrap();
+        assert_eq!(wire, frame(&[1, KIND_CANCELLED]));
     }
 
     #[test]
@@ -303,9 +361,9 @@ mod tests {
 
     #[test]
     fn other_version_is_rejected() {
-        let wire = frame(&[2, 1]);
+        let wire = frame(&[3, 1]);
         let error = read_request(&mut wire.as_slice()).unwrap_err();
-        assert!(matches!(error, ProtocolError::UnsupportedVersion(2)));
+        assert!(matches!(error, ProtocolError::UnsupportedVersion(3)));
     }
 
     #[test]

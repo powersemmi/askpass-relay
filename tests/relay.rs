@@ -260,3 +260,21 @@ fn askpass_link_name_runs_ask_with_the_prompt_as_its_only_argument() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"hunter%2\n");
 }
+
+#[test]
+fn caller_reason_reaches_the_dialog() {
+    let relay = Relay::start("ok");
+    let output = Command::new(BIN)
+        .args(["ask", PROMPT])
+        .env("ASKPASS_RELAY_SOCKET", relay.scratch.socket())
+        .env("ASKPASS_RELAY_REASON", "install docker for the live stands")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let log = relay.pinentry_log();
+    let desc = log.lines().find(|l| l.starts_with("SETDESC ")).unwrap();
+    assert!(
+        desc.ends_with("Reason: install docker for the live stands"),
+        "{desc}"
+    );
+}

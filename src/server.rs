@@ -25,6 +25,8 @@ macro_rules! log {
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest command line the dialog shows.
 const MAX_COMMAND_CHARS: usize = 400;
+/// The longest reason the dialog shows.
+const MAX_REASON_CHARS: usize = 200;
 
 /// The relay could not start.
 #[derive(Debug, Error)]
@@ -127,50 +129,84 @@ fn answer(request: &Request, dialog: &Dialog, timeout: Duration) -> Response {
     }
 }
 
-/// The dialog texts for a request: the host, the user, the command and sudo's own prompt.
+/// The dialog texts for a request: the account, the host, the command and the caller's reason.
 #[must_use]
 pub fn describe(request: &Request) -> PromptText {
-    let mut command: String = request.command.chars().take(MAX_COMMAND_CHARS).collect();
-    if command.len() < request.command.len() {
-        command.push_str(" ...");
+    let Request {
+        host, user, reason, ..
+    } = request;
+    let command = shorten(&request.command, MAX_COMMAND_CHARS);
+    let mut description =
+        format!("sudo on {host} asks for the password of {user} to run:\n\n{command}");
+    // The reason comes after the command and on one line, so it cannot push the command out of
+    // sight or pose as part of it.
+    if let Some(reason) = reason {
+        let one_line: String = reason
+            .chars()
+            .map(|ch| if ch.is_control() { ' ' } else { ch })
+            .collect();
+        description.push_str("\n\nReason: ");
+        description.push_str(&shorten(&one_line, MAX_REASON_CHARS));
     }
-    let Request { host, user, .. } = request;
     PromptText {
         title: format!("sudo password for {user}@{host}"),
-        description: format!(
-            "Enter the login password of the account {user} on the host {host}. \
-             sudo on {host} asks for it to run this command:\n\n{command}\n\n\
-             Each wrong password counts as a failed login on {host}; a host with a lockout \
-             policy locks the account after as few as 3. \
-             Cancel if you did not expect this command."
-        ),
+        description,
         prompt: format!("Password of {user}@{host}:"),
     }
+}
+
+fn shorten(text: &str, max_chars: usize) -> String {
+    let mut short: String = text.chars().take(max_chars).collect();
+    if short.len() < text.len() {
+        short.push_str(" ...");
+    }
+    short
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn description_names_host_user_command_and_prompt() {
-        let text = describe(&Request {
+    fn request(reason: Option<&str>) -> Request {
+        Request {
             host: "air".into(),
             user: "alice".into(),
             prompt: "Password: ".into(),
             command: "sudo -A true".into(),
-        });
+            reason: reason.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn without_a_reason_the_description_names_the_host_and_the_command() {
+        let text = describe(&request(None));
         assert_eq!(text.title, "sudo password for alice@air");
         assert_eq!(
             text.description,
-            "Enter the login password of the account alice on the host air. \
-             sudo on air asks for it to run this command:\n\n\
-             sudo -A true\n\n\
-             Each wrong password counts as a failed login on air; a host with a lockout \
-             policy locks the account after as few as 3. \
-             Cancel if you did not expect this command."
+            "sudo on air asks for the password of alice to run:\n\nsudo -A true"
         );
         assert_eq!(text.prompt, "Password of alice@air:");
+    }
+
+    #[test]
+    fn the_reason_follows_the_command() {
+        let text = describe(&request(Some("install docker for the live stands")));
+        assert_eq!(text.title, "sudo password for alice@air");
+        assert_eq!(
+            text.description,
+            "sudo on air asks for the password of alice to run:\n\nsudo -A true\n\n\
+             Reason: install docker for the live stands"
+        );
+    }
+
+    #[test]
+    fn the_reason_is_one_short_line() {
+        let reason = format!("a\n\n\nb\r\tc{}", "y".repeat(1000));
+        let text = describe(&request(Some(&reason)));
+        let shown = text.description.split("Reason: ").nth(1).unwrap();
+        assert!(shown.starts_with("a   b  c"), "{shown}");
+        assert!(!shown.contains(&"y".repeat(MAX_REASON_CHARS)), "{shown}");
+        assert!(shown.ends_with(" ..."), "{shown}");
     }
 
     #[test]
@@ -180,6 +216,7 @@ mod tests {
             user: "u".into(),
             prompt: String::new(),
             command: "x".repeat(1000),
+            reason: None,
         });
         assert!(
             text.description

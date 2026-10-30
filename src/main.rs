@@ -68,11 +68,14 @@ struct Ask {
     prompt: Vec<String>,
 }
 
-/// Run under this name, the binary is `ask` with the prompt as its only argument: sudo runs
-/// `SUDO_ASKPASS` as a bare path, so it cannot pass a subcommand.
 /// Seconds `ask` waits for an answer by default.
 const DEFAULT_ASK_TIMEOUT: u64 = 180;
 
+/// The variable a caller sets to tell the maintainer why it runs sudo.
+const REASON_VARIABLE: &str = "ASKPASS_RELAY_REASON";
+
+/// Run under this name, the binary is `ask` with the prompt as its only argument: sudo runs
+/// `SUDO_ASKPASS` as a bare path, so it cannot pass a subcommand.
 const ASK_LINK_NAME: &str = "askpass-relay-ask";
 
 fn main() -> ExitCode {
@@ -138,6 +141,11 @@ fn run_ask(args: Ask) -> Result<()> {
         user: client::user_name(),
         prompt: args.prompt.join(" "),
         command: client::command_line(parent_id()),
+        // sudo starts the askpass program with the invoking user's environment, so a reason set
+        // on the sudo command line arrives here, on Linux and on macOS alike.
+        reason: env::var(REASON_VARIABLE)
+            .ok()
+            .filter(|reason| !reason.is_empty()),
     };
     let password = client::ask(&socket, &request, Duration::from_secs(args.timeout))?;
     let mut line = Zeroizing::new(Vec::with_capacity(password.len() + 1));

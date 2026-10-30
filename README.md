@@ -40,10 +40,12 @@ sequenceDiagram
 ## Protocol
 
 Each message is one frame: a big-endian `u32` payload length, then the payload. The payload is
-the protocol version (`1`), a message kind, and fields, each a big-endian `u16` length and its
-bytes. A request carries the host, the user, sudo's prompt and the command line of the sudo
-process. The answer is a password, a cancel, or a failure with its reason. Frames over 64 KiB,
-another version, an unknown kind, a missing field or trailing bytes are rejected.
+the protocol version, a message kind, and fields, each a big-endian `u16` length and its bytes.
+A request (version 2) carries the host, the user, sudo's prompt, the command line of the sudo
+process and the caller's reason, empty when there is none. The relay also reads version 1
+requests, which have no reason. The answer (version 1) is a password, a cancel, or a failure
+with its reason. Frames over 64 KiB, another version, an unknown kind, a missing field or
+trailing bytes are rejected.
 
 ## Install on the desktop
 
@@ -120,11 +122,19 @@ ssh air 'sudo -A -k true && echo ok'
 The desktop shows a dialog. Approve it, and the command runs. Cancel it, and sudo exits with an
 error at once.
 
-The dialog is titled "sudo password for <user>@<host>". It asks for the login password of that
-account on that host and shows the command that needs it. A wrong password makes sudo ask
-again, up to three times, and each failure counts against the host's lockout policy
-(`pam_faillock` on Arch locks the account for ten minutes after three). Cancel a dialog you did
-not expect.
+The dialog is titled "sudo password for <user>@<host>" and shows the command that asked. A
+caller says why it needs root with `ASKPASS_RELAY_REASON`:
+
+```sh
+ssh pro 'ASKPASS_RELAY_REASON="install docker for the live stands" sudo -A pacman -S docker'
+```
+
+sudo starts the askpass program with the caller's environment, so the variable reaches `ask` on
+Linux and on macOS. The dialog shows the reason on one line below the command; the title and the
+command stay whatever the reason says.
+
+A wrong password makes sudo ask again, up to three times, and each failure counts against the
+host's lockout policy (`pam_faillock` on Arch locks the account for ten minutes after three).
 
 `ask` has its own options for a manual check: `askpass-relay ask --socket <path> "<prompt>"`.
 `ASKPASS_RELAY_SOCKET` overrides the default socket `~/.askpass-relay/sock`.
