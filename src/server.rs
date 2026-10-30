@@ -134,16 +134,17 @@ pub fn describe(request: &Request) -> PromptText {
     if command.len() < request.command.len() {
         command.push_str(" ...");
     }
+    let Request { host, user, .. } = request;
     PromptText {
-        title: format!("sudo on {}", request.host),
+        title: format!("sudo password for {user}@{host}"),
         description: format!(
-            "{}@{} asks for the sudo password.\n\nCommand: {}\nPrompt: {}",
-            request.user,
-            request.host,
-            command,
-            request.prompt.trim()
+            "Enter the login password of the account {user} on the host {host}. \
+             sudo on {host} asks for it to run this command:\n\n{command}\n\n\
+             Each wrong password counts as a failed login on {host}; a host with a lockout \
+             policy locks the account after as few as 3. \
+             Cancel if you did not expect this command."
         ),
-        prompt: "Password:".into(),
+        prompt: format!("Password of {user}@{host}:"),
     }
 }
 
@@ -159,11 +160,17 @@ mod tests {
             prompt: "Password: ".into(),
             command: "sudo -A true".into(),
         });
-        assert_eq!(text.title, "sudo on air");
+        assert_eq!(text.title, "sudo password for moloko@air");
         assert_eq!(
             text.description,
-            "moloko@air asks for the sudo password.\n\nCommand: sudo -A true\nPrompt: Password:"
+            "Enter the login password of the account moloko on the host air. \
+             sudo on air asks for it to run this command:\n\n\
+             sudo -A true\n\n\
+             Each wrong password counts as a failed login on air; a host with a lockout \
+             policy locks the account after as few as 3. \
+             Cancel if you did not expect this command."
         );
+        assert_eq!(text.prompt, "Password of moloko@air:");
     }
 
     #[test]

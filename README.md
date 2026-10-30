@@ -3,8 +3,8 @@
 `askpass-relay` lets a non-interactive `ssh host 'sudo -A ...'` ask for the sudo password in a
 dialog on your desktop. sudo on the remote host runs `askpass-relay-ask` as its askpass program.
 It sends the request over a unix socket that ssh forwards back to your desktop. There
-`askpass-relay serve` shows a pinentry dialog naming the host, the user and the command, and
-returns the password you type, or a cancel.
+`askpass-relay serve` shows a pinentry dialog that asks for the password of that account on that
+host and names the command, and returns the password you type, or a cancel.
 
 ```text
 remote host                                   desktop
@@ -112,10 +112,11 @@ ssh air 'sudo -A -k true && echo ok'
 The desktop shows a dialog. Approve it, and the command runs. Cancel it, and sudo exits with an
 error at once.
 
-The dialog takes the keyboard focus when it opens, so keys typed into another window at that
-moment land in it. A wrong password makes sudo ask again, up to three times, and each failure
-counts against the host's lockout policy (`pam_faillock` on Arch locks the account for ten
-minutes after three). Cancel a dialog you did not mean to answer.
+The dialog is titled "sudo password for <user>@<host>". It asks for the login password of that
+account on that host and shows the command that needs it. A wrong password makes sudo ask
+again, up to three times, and each failure counts against the host's lockout policy
+(`pam_faillock` on Arch locks the account for ten minutes after three). Cancel a dialog you did
+not expect.
 
 `ask` has its own options for a manual check: `askpass-relay ask --socket <path> "<prompt>"`.
 `ASKPASS_RELAY_SOCKET` overrides the default socket `~/.askpass-relay/sock`.

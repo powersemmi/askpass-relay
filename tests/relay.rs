@@ -141,7 +141,6 @@ fn dialog_names_the_host_the_user_and_the_command() {
         desc.contains(me),
         "the caller's command line is missing: {desc}"
     );
-    assert!(desc.contains(PROMPT.trim()), "{desc}");
 }
 
 #[test]
