@@ -193,7 +193,7 @@ fn pango_escape(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::io::Write;
     use std::path::Path;
     use std::time::Instant;
     use std::{env, fs, process};
@@ -208,10 +208,32 @@ mod tests {
         }
     }
 
+    /// Writes an executable script from a child process. A test that writes it from its own process
+    /// races with the forks of tests running beside it: a fork that inherits the open file makes the
+    /// later exec fail with "Text file busy".
+    fn write_executable(path: &Path, body: &str) {
+        let mut writer = Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 700 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("start the script writer");
+        writer
+            .stdin
+            .take()
+            .expect("the writer's stdin is piped")
+            .write_all(body.as_bytes())
+            .expect("send the script");
+        assert!(
+            writer.wait().expect("wait for the writer").success(),
+            "writing {} failed",
+            path.display()
+        );
+    }
+
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        write_executable(&path, &format!("#!/bin/sh\n{body}"));
         path
     }
 

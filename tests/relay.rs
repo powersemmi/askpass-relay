@@ -31,6 +31,29 @@ while IFS= read -r line; do
 done
 "#;
 
+/// Writes an executable script from a child process. A test that writes it from its own process
+/// races with the forks of tests running beside it: a fork that inherits the open file makes the
+/// later exec fail with "Text file busy".
+fn write_executable(path: &Path, body: &str) {
+    let mut writer = Command::new("sh")
+        .args(["-c", "cat > \"$1\" && chmod 700 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("start the script writer");
+    writer
+        .stdin
+        .take()
+        .expect("the writer's stdin is piped")
+        .write_all(body.as_bytes())
+        .expect("send the script");
+    assert!(
+        writer.wait().expect("wait for the writer").success(),
+        "writing {} failed",
+        path.display()
+    );
+}
+
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 struct Scratch(PathBuf);
@@ -67,9 +90,7 @@ impl Relay {
     fn start(mode: &str) -> Self {
         let scratch = Scratch::new();
         let pinentry = scratch.0.join("fake-pinentry");
-        fs::write(&pinentry, FAKE_PINENTRY).expect("write the fake pinentry");
-        fs::set_permissions(&pinentry, fs::Permissions::from_mode(0o700))
-            .expect("make the fake pinentry executable");
+        write_executable(&pinentry, FAKE_PINENTRY);
         let mut child = Command::new(BIN)
             .args(["serve", "--no-fallback", "--timeout", "1", "--socket"])
             .arg(scratch.socket())
