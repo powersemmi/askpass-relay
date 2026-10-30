@@ -1,0 +1,14 @@
+[Unit]
+Description=Relay sudo -A password prompts from remote hosts to a desktop dialog
+Documentation=file://%h/RustroverProjects/askpass-relay/README.md
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.cargo/bin/askpass-relay serve
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=graphical-session.target
